@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import {
+  MODEL_OUTPUT_TOKENS,
+  assertAnthropicResponseComplete,
+  getAnthropicExportConfig,
+} from "@/lib/ai-models";
 import { buildRunLoopMd, getVisualDiffMjs } from "./handoff-assets";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
-
-const DEFAULT_EXPORT_MODEL = "claude-opus-4-7";
+export const maxDuration = 900;
 
 type RequestBody = {
   html?: unknown;
@@ -372,11 +375,14 @@ export async function POST(req: Request) {
   });
 
   try {
-    const model = process.env.ANTHROPIC_EXPORT_MODEL || DEFAULT_EXPORT_MODEL;
-    console.log(`[export] streaming Claude (model=${model}, max_tokens=16000)…`);
+    const { model, reasoningEffort } = getAnthropicExportConfig();
+    console.log(
+      `[export] streaming Claude (model=${model}, effort=${reasoningEffort}, max_tokens=${MODEL_OUTPUT_TOKENS.export})…`,
+    );
     const stream = client.messages.stream({
       model,
-      max_tokens: 16000,
+      max_tokens: MODEL_OUTPUT_TOKENS.export,
+      output_config: { effort: reasoningEffort },
       messages: [{ role: "user", content: prompt }],
     });
 
@@ -397,6 +403,7 @@ export async function POST(req: Request) {
     });
 
     const response = await stream.finalMessage();
+    assertAnthropicResponseComplete(response);
 
     const elapsedMs = Date.now() - startedAt;
     console.log("[export] Claude responded", {

@@ -44,6 +44,9 @@ type GenerationMeta = {
   directions: CreativeDirection[];
   qaReports: MockupQAReport[];
   usedProvider: GenerationProvider;
+  usedModel?: string;
+  usedReasoningEffort?: string;
+  usedReasoningMode?: string;
   usedResearchSource: "firecrawl" | "provider-tools" | "mixed";
 };
 type RefineQAReport = {
@@ -100,6 +103,33 @@ const FORM_REQUIREMENT_OPTIONS: Array<{
   { id: "newsletter", label: "Newsletter signup" },
   { id: "custom", label: "Custom" },
 ];
+
+const PROVIDER_OPTIONS = [
+  {
+    id: "openai",
+    title: "OpenAI GPT-5.6 Sol",
+    description: "Pro mode with max reasoning effort",
+  },
+  {
+    id: "anthropic",
+    title: "Anthropic Claude Fable 5",
+    description: "Adaptive thinking with max effort",
+  },
+] as const;
+
+function providerModelLabel(
+  provider: GenerationProvider,
+  model?: string,
+) {
+  if (
+    !model ||
+    (provider === "openai" && model === "gpt-5.6-sol") ||
+    (provider === "anthropic" && model === "claude-fable-5")
+  ) {
+    return PROVIDER_OPTIONS.find((option) => option.id === provider)?.title;
+  }
+  return `${provider === "openai" ? "OpenAI" : "Anthropic"} ${model}`;
+}
 
 function isFormRequirement(value: unknown): value is FormRequirement {
   return (
@@ -739,6 +769,16 @@ export default function Home() {
         directions: (data.directions as CreativeDirection[]) ?? [],
         qaReports: (data.qaReports as MockupQAReport[]) ?? [],
         usedProvider: (data.usedProvider as GenerationProvider) ?? generationProvider,
+        usedModel:
+          typeof data.usedModel === "string" ? data.usedModel : undefined,
+        usedReasoningEffort:
+          typeof data.usedReasoningEffort === "string"
+            ? data.usedReasoningEffort
+            : undefined,
+        usedReasoningMode:
+          typeof data.usedReasoningMode === "string"
+            ? data.usedReasoningMode
+            : undefined,
         usedResearchSource:
           (data.usedResearchSource as GenerationMeta["usedResearchSource"]) ??
           "provider-tools",
@@ -1181,21 +1221,7 @@ export default function Home() {
                 configured.
               </p>
               <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                {(
-                  [
-                    {
-                      id: "openai",
-                      title: "OpenAI GPT-5.5",
-                      description:
-                        "Default premium flow with Responses API",
-                    },
-                    {
-                      id: "anthropic",
-                      title: "Anthropic Opus 4.7",
-                      description: "Alternate premium flow with Claude Opus",
-                    },
-                  ] as const
-                ).map((opt) => (
+                {PROVIDER_OPTIONS.map((opt) => (
                   <label
                     key={opt.id}
                     className={`cursor-pointer rounded-2xl border p-4 transition ${
@@ -1785,9 +1811,7 @@ export default function Home() {
                       Engine
                     </p>
                     <p className="mt-1 font-semibold text-slate-900">
-                      {generationProvider === "openai"
-                        ? "OpenAI GPT-5.5"
-                        : "Anthropic Opus 4.7"}
+                      {providerModelLabel(generationProvider)}
                     </p>
                     <p className="mt-1 text-xs text-slate-500">
                       Firecrawl first, provider fallback
@@ -1889,9 +1913,20 @@ export default function Home() {
                     Provider
                   </p>
                   <p className="mt-1 font-semibold text-slate-900">
-                    {generationMeta.usedProvider === "openai"
-                      ? "OpenAI GPT-5.5"
-                      : "Anthropic Opus 4.7"}
+                    {providerModelLabel(
+                      generationMeta.usedProvider,
+                      generationMeta.usedModel,
+                    )}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {[
+                      generationMeta.usedReasoningMode,
+                      generationMeta.usedReasoningEffort
+                        ? `${generationMeta.usedReasoningEffort} effort`
+                        : undefined,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ") || "Premium reasoning"}
                   </p>
                 </div>
                 <div>

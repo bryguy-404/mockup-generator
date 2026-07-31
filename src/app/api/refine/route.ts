@@ -1,8 +1,15 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import {
+  MODEL_OUTPUT_TOKENS,
+  assertAnthropicResponseComplete,
+  extractOpenAIText,
+  getAnthropicMockupConfig,
+  getOpenAIMockupConfig,
+} from "@/lib/ai-models";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 900;
 
 type GenerationProvider = "anthropic" | "openai";
 type RequestBody = {
@@ -20,45 +27,8 @@ type RefineQAReport = {
   checkedViewports: string[];
 };
 
-const DEFAULT_OPENAI_MODEL = "gpt-5.5";
-const DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7";
-
 function badRequest(error: string) {
   return NextResponse.json({ error }, { status: 400 });
-}
-
-function extractOpenAIText(value: unknown): string {
-  if (!value || typeof value !== "object") {
-    throw new Error("OpenAI response was not an object");
-  }
-  const response = value as { output_text?: unknown; output?: unknown };
-  if (typeof response.output_text === "string" && response.output_text.trim()) {
-    return response.output_text.trim();
-  }
-
-  const parts: string[] = [];
-  if (Array.isArray(response.output)) {
-    for (const item of response.output) {
-      const content =
-        item && typeof item === "object"
-          ? (item as { content?: unknown }).content
-          : null;
-      if (!Array.isArray(content)) continue;
-      for (const block of content) {
-        if (
-          block &&
-          typeof block === "object" &&
-          (block as { type?: unknown }).type === "output_text" &&
-          typeof (block as { text?: unknown }).text === "string"
-        ) {
-          parts.push((block as { text: string }).text);
-        }
-      }
-    }
-  }
-  const text = parts.join("\n").trim();
-  if (!text) throw new Error("OpenAI returned no text content");
-  return text;
 }
 
 function protectDataUrls(html: string) {
@@ -97,6 +67,7 @@ function parseHtml(text: string, fallback: string) {
 }
 
 async function callOpenAI(apiKey: string, prompt: string) {
+  const { model, reasoningEffort, reasoningMode } = getOpenAIMockupConfig();
   const res = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -104,10 +75,10 @@ async function callOpenAI(apiKey: string, prompt: string) {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: process.env.OPENAI_MOCKUP_MODEL || DEFAULT_OPENAI_MODEL,
+      model,
       input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
-      max_output_tokens: 24000,
-      reasoning: { effort: process.env.OPENAI_REASONING_EFFORT || "medium" },
+      max_output_tokens: MODEL_OUTPUT_TOKENS.refine,
+      reasoning: { effort: reasoningEffort, mode: reasoningMode },
       store: false,
     }),
   });
@@ -126,13 +97,16 @@ async function callOpenAI(apiKey: string, prompt: string) {
 }
 
 async function callAnthropic(apiKey: string, prompt: string) {
+  const { model, reasoningEffort } = getAnthropicMockupConfig();
   const client = new Anthropic({ apiKey });
   const stream = client.messages.stream({
-    model: process.env.ANTHROPIC_MOCKUP_MODEL || DEFAULT_ANTHROPIC_MODEL,
-    max_tokens: 24000,
+    model,
+    max_tokens: MODEL_OUTPUT_TOKENS.refine,
+    output_config: { effort: reasoningEffort },
     messages: [{ role: "user", content: prompt }],
   });
   const response = await stream.finalMessage();
+  assertAnthropicResponseComplete(response);
   const text = response.content
     .filter((block): block is Anthropic.TextBlock => block.type === "text")
     .map((block) => block.text)

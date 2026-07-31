@@ -1,8 +1,15 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import {
+  MODEL_OUTPUT_TOKENS,
+  assertAnthropicResponseComplete,
+  extractOpenAIText,
+  getAnthropicMockupConfig,
+  getOpenAIMockupConfig,
+} from "@/lib/ai-models";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 900;
 
 type Mockup = { name: string; html: string };
 type LogoBackground = "light" | "dark" | "either";
@@ -87,9 +94,6 @@ type RequestBody = {
 
 const LOGO_PLACEHOLDER = "__LOGO_DATA_URL__";
 const HERO_IMAGE_PLACEHOLDER = "__HERO_IMAGE_DATA_URL__";
-const DEFAULT_OPENAI_MODEL = "gpt-5.5";
-const DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7";
-const DEFAULT_OPENAI_REASONING = "medium";
 const MAX_SCREENSHOTS = 3;
 const MAX_CLIENT_IMAGES = 12;
 const MAX_LOGO_DATA_URL_BYTES = 2.2 * 1024 * 1024;
@@ -98,6 +102,7 @@ const MAX_CLIENT_IMAGE_DATA_URL_BYTES = 2.2 * 1024 * 1024;
 const MAX_TOTAL_CLIENT_IMAGE_BYTES = 18 * 1024 * 1024;
 const MAX_RESEARCH_CHARS_PER_PAGE = 12000;
 const MAX_REPAIR_PASSES = 1;
+const MAX_ANTHROPIC_PAUSE_CONTINUATIONS = 3;
 
 function badRequest(error: string) {
   return NextResponse.json({ error }, { status: 400 });
@@ -237,37 +242,6 @@ function parseMockupsFromText(text: string): Mockup[] {
   const parsed = extractJson(text);
   if (isValidMockups(parsed)) return parsed.mockups;
   throw new Error("Model response did not include three valid HTML mockups");
-}
-
-function extractOpenAIText(value: unknown): string {
-  if (!value || typeof value !== "object") {
-    throw new Error("OpenAI response was not an object");
-  }
-  const response = value as { output_text?: unknown; output?: unknown };
-  if (typeof response.output_text === "string" && response.output_text.trim()) {
-    return response.output_text.trim();
-  }
-
-  const parts: string[] = [];
-  if (Array.isArray(response.output)) {
-    for (const item of response.output) {
-      const content = item && typeof item === "object" ? (item as { content?: unknown }).content : null;
-      if (!Array.isArray(content)) continue;
-      for (const block of content) {
-        if (
-          block &&
-          typeof block === "object" &&
-          (block as { type?: unknown }).type === "output_text" &&
-          typeof (block as { text?: unknown }).text === "string"
-        ) {
-          parts.push((block as { text: string }).text);
-        }
-      }
-    }
-  }
-  const text = parts.join("\n").trim();
-  if (!text) throw new Error("OpenAI returned no text content");
-  return text;
 }
 
 function parseClientImages(value: unknown): ClientImageAsset[] {
@@ -421,8 +395,7 @@ async function generateWithOpenAI(args: {
   useWebSearch?: boolean;
   maxOutputTokens?: number;
 }) {
-  const model = process.env.OPENAI_MOCKUP_MODEL || DEFAULT_OPENAI_MODEL;
-  const reasoningEffort = process.env.OPENAI_REASONING_EFFORT || DEFAULT_OPENAI_REASONING;
+  const { model, reasoningEffort, reasoningMode } = getOpenAIMockupConfig();
   const content = [
     ...(args.images ?? []).map((s) => ({
       type: "input_image",
@@ -435,8 +408,8 @@ async function generateWithOpenAI(args: {
   const body: Record<string, unknown> = {
     model,
     input: [{ role: "user", content }],
-    max_output_tokens: args.maxOutputTokens ?? 24000,
-    reasoning: { effort: reasoningEffort },
+    max_output_tokens: args.maxOutputTokens ?? MODEL_OUTPUT_TOKENS.mockups,
+    reasoning: { effort: reasoningEffort, mode: reasoningMode },
     store: false,
   };
   if (args.useWebSearch) {
@@ -473,7 +446,7 @@ async function generateWithAnthropic(args: {
   useWebFetch?: boolean;
   maxTokens?: number;
 }) {
-  const model = process.env.ANTHROPIC_MOCKUP_MODEL || DEFAULT_ANTHROPIC_MODEL;
+  const { model, reasoningEffort } = getAnthropicMockupConfig();
   const client = new Anthropic({ apiKey: args.apiKey });
   const content = [
     ...(args.images ?? []).map((s) => ({
@@ -483,10 +456,14 @@ async function generateWithAnthropic(args: {
     { type: "text", text: args.prompt },
   ];
 
+  const messages: Array<Record<string, unknown>> = [
+    { role: "user", content },
+  ];
   const request: Record<string, unknown> = {
     model,
-    max_tokens: args.maxTokens ?? 24000,
-    messages: [{ role: "user", content }],
+    max_tokens: args.maxTokens ?? MODEL_OUTPUT_TOKENS.mockups,
+    output_config: { effort: reasoningEffort },
+    messages,
   };
   if (args.useWebFetch) {
     request.betas = ["web-fetch-2025-09-10"];
@@ -500,8 +477,27 @@ async function generateWithAnthropic(args: {
     ];
   }
 
-  const stream = client.beta.messages.stream(request as never);
-  const response = await stream.finalMessage();
+  let stream = client.beta.messages.stream(request as never);
+  let response = await stream.finalMessage();
+  let pauseContinuations = 0;
+  while (
+    response.stop_reason === "pause_turn" &&
+    pauseContinuations < MAX_ANTHROPIC_PAUSE_CONTINUATIONS
+  ) {
+    pauseContinuations += 1;
+    messages.splice(
+      0,
+      messages.length,
+      { role: "user", content },
+      { role: "assistant", content: response.content },
+    );
+    console.log("[generate] continuing paused Anthropic server-tool turn", {
+      continuation: pauseContinuations,
+    });
+    stream = client.beta.messages.stream({ ...request, messages } as never);
+    response = await stream.finalMessage();
+  }
+  assertAnthropicResponseComplete(response);
   const text = response.content
     .filter((block): block is Anthropic.Beta.BetaTextBlock => block.type === "text")
     .map((block) => block.text)
@@ -879,7 +875,7 @@ async function qaMockup(args: {
       apiKey: args.apiKey,
       prompt: buildQaPrompt(args.raw.name, local),
       images: rendered,
-      maxTokens: 4000,
+      maxTokens: MODEL_OUTPUT_TOKENS.qa,
     });
     const qa = parseQa(text, local);
     if (!local.pass) {
@@ -958,6 +954,10 @@ export async function POST(req: Request) {
   if (!clientName) return badRequest("Client name is required");
 
   const provider: GenerationProvider = body.generationProvider === "anthropic" ? "anthropic" : "openai";
+  const modelConfig =
+    provider === "openai"
+      ? getOpenAIMockupConfig()
+      : getAnthropicMockupConfig();
   const apiKey = provider === "openai" ? process.env.OPENAI_API_KEY : process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
@@ -1021,6 +1021,10 @@ export async function POST(req: Request) {
 
   console.log("[generate] premium request received", {
     provider,
+    model: modelConfig.model,
+    reasoningEffort: modelConfig.reasoningEffort,
+    reasoningMode:
+      "reasoningMode" in modelConfig ? modelConfig.reasoningMode : undefined,
     clientName,
     currentSite: currentSite || null,
     inspirationUrls: cleanedUrls.length,
@@ -1063,7 +1067,7 @@ export async function POST(req: Request) {
       prompt: analysisPrompt,
       images: [...parsedScreenshots, ...researchImages].slice(0, 7),
       useProviderTools,
-      maxTokens: 8000,
+      maxTokens: MODEL_OUTPUT_TOKENS.directions,
     });
     const analysis = parseAnalysis(analysisText, clientName);
 
@@ -1089,7 +1093,7 @@ export async function POST(req: Request) {
       prompt: htmlPrompt,
       images: [...parsedScreenshots, ...researchImages].slice(0, 7),
       useProviderTools,
-      maxTokens: 48000,
+      maxTokens: MODEL_OUTPUT_TOKENS.mockups,
     });
     const rawMockups = parseMockupsFromText(htmlText);
     let injectedMockups = injectUploadedAssets(rawMockups, logoDataUrl, clientImages, legacyHeroPhoto);
@@ -1124,7 +1128,7 @@ export async function POST(req: Request) {
             imageAssets: clientImages,
             logoBackground,
           }),
-          maxTokens: 18000,
+          maxTokens: MODEL_OUTPUT_TOKENS.repair,
         });
         rawMockups[i] = parseSingleHtmlBlock(repairText, rawMockups[i]);
       }
@@ -1158,6 +1162,10 @@ export async function POST(req: Request) {
       directions: analysis.directions,
       qaReports,
       usedProvider: provider,
+      usedModel: modelConfig.model,
+      usedReasoningEffort: modelConfig.reasoningEffort,
+      usedReasoningMode:
+        "reasoningMode" in modelConfig ? modelConfig.reasoningMode : undefined,
       usedResearchSource: research.source,
     });
   } catch (err) {

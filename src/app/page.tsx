@@ -47,6 +47,7 @@ type GenerationMeta = {
   usedModel?: string;
   usedReasoningEffort?: string;
   usedReasoningMode?: string;
+  usedServiceTier?: string;
   usedResearchSource: "firecrawl" | "provider-tools" | "mixed";
 };
 type RefineQAReport = {
@@ -108,7 +109,7 @@ const PROVIDER_OPTIONS = [
   {
     id: "openai",
     title: "OpenAI GPT-5.6 Sol",
-    description: "Pro mode with max reasoning effort",
+    description: "Pro/max reasoning with Fast processing",
   },
   {
     id: "anthropic",
@@ -778,6 +779,10 @@ export default function Home() {
         usedReasoningMode:
           typeof data.usedReasoningMode === "string"
             ? data.usedReasoningMode
+            : undefined,
+        usedServiceTier:
+          typeof data.usedServiceTier === "string"
+            ? data.usedServiceTier
             : undefined,
         usedResearchSource:
           (data.usedResearchSource as GenerationMeta["usedResearchSource"]) ??
@@ -1923,6 +1928,9 @@ export default function Home() {
                       generationMeta.usedReasoningMode,
                       generationMeta.usedReasoningEffort
                         ? `${generationMeta.usedReasoningEffort} effort`
+                        : undefined,
+                      generationMeta.usedServiceTier
+                        ? `${generationMeta.usedServiceTier} processing`
                         : undefined,
                     ]
                       .filter(Boolean)

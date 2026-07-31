@@ -2,6 +2,7 @@ export const DEFAULT_OPENAI_MODEL = "gpt-5.6-sol";
 export const DEFAULT_ANTHROPIC_MODEL = "claude-fable-5";
 export const DEFAULT_OPENAI_REASONING_EFFORT = "max";
 export const DEFAULT_OPENAI_REASONING_MODE = "pro";
+export const DEFAULT_OPENAI_SERVICE_TIER = "fast";
 export const DEFAULT_ANTHROPIC_REASONING_EFFORT = "max";
 
 export const MODEL_OUTPUT_TOKENS = {
@@ -23,6 +24,13 @@ const OPENAI_REASONING_EFFORTS = [
   "max",
 ] as const;
 const OPENAI_REASONING_MODES = ["standard", "pro"] as const;
+const OPENAI_SERVICE_TIERS = [
+  "auto",
+  "default",
+  "flex",
+  "fast",
+  "priority",
+] as const;
 const ANTHROPIC_REASONING_EFFORTS = [
   "low",
   "medium",
@@ -34,6 +42,7 @@ const ANTHROPIC_REASONING_EFFORTS = [
 export type OpenAIReasoningEffort =
   (typeof OPENAI_REASONING_EFFORTS)[number];
 export type OpenAIReasoningMode = (typeof OPENAI_REASONING_MODES)[number];
+export type OpenAIServiceTier = (typeof OPENAI_SERVICE_TIERS)[number];
 export type AnthropicReasoningEffort =
   (typeof ANTHROPIC_REASONING_EFFORTS)[number];
 
@@ -62,6 +71,11 @@ export function getOpenAIMockupConfig() {
       "OPENAI_REASONING_MODE",
       OPENAI_REASONING_MODES,
       DEFAULT_OPENAI_REASONING_MODE,
+    ),
+    serviceTier: readChoice(
+      "OPENAI_SERVICE_TIER",
+      OPENAI_SERVICE_TIERS,
+      DEFAULT_OPENAI_SERVICE_TIER,
     ),
   };
 }

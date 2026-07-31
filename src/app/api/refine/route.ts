@@ -7,9 +7,12 @@ import {
   getAnthropicMockupConfig,
   getOpenAIMockupConfig,
 } from "@/lib/ai-models";
+import { createAndPollOpenAIResponse } from "@/lib/openai-responses";
 
 export const runtime = "nodejs";
 export const maxDuration = 900;
+
+const ROUTE_WORK_DEADLINE_MS = 13 * 60 * 1_000;
 
 type GenerationProvider = "anthropic" | "openai";
 type RequestBody = {
@@ -66,33 +69,27 @@ function parseHtml(text: string, fallback: string) {
   return fallback;
 }
 
-async function callOpenAI(apiKey: string, prompt: string) {
-  const { model, reasoningEffort, reasoningMode } = getOpenAIMockupConfig();
-  const res = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
+async function callOpenAI(
+  apiKey: string,
+  prompt: string,
+  signal: AbortSignal,
+  deadlineAt: number,
+) {
+  const { model, reasoningEffort, reasoningMode, serviceTier } =
+    getOpenAIMockupConfig();
+  const json = await createAndPollOpenAIResponse({
+    apiKey,
+    body: {
       model,
       input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
       max_output_tokens: MODEL_OUTPUT_TOKENS.refine,
       reasoning: { effort: reasoningEffort, mode: reasoningMode },
+      service_tier: serviceTier,
       store: false,
-    }),
+    },
+    deadlineAt,
+    signal,
   });
-  const json = (await res.json().catch(() => null)) as unknown;
-  if (!res.ok) {
-    const message =
-      json &&
-      typeof json === "object" &&
-      typeof (json as { error?: { message?: unknown } }).error?.message ===
-        "string"
-        ? (json as { error: { message: string } }).error.message
-        : `OpenAI API error (${res.status})`;
-    throw new Error(message);
-  }
   return extractOpenAIText(json);
 }
 
@@ -159,7 +156,10 @@ ${args.html}
 ~~~`;
 }
 
-async function quickQa(html: string): Promise<RefineQAReport> {
+async function quickQa(
+  html: string,
+  options?: { deadlineAt?: number; signal?: AbortSignal },
+): Promise<RefineQAReport> {
   const checkedViewports: string[] = [];
   const issues: string[] = [];
   if (!html.includes("<meta name=\"viewport\"")) {
@@ -168,28 +168,54 @@ async function quickQa(html: string): Promise<RefineQAReport> {
   if (!/<button[\s\S]{0,500}(aria-label|span|svg)/i.test(html)) {
     issues.push("Mobile menu button is not obvious.");
   }
+  if (options?.signal?.aborted) {
+    throw new Error("Refinement request was cancelled");
+  }
+  if (options?.deadlineAt && options.deadlineAt - Date.now() < 5_000) {
+    console.warn("[refine] Playwright QA skipped to preserve route deadline");
+    return { pass: issues.length === 0, issues, checkedViewports };
+  }
 
   try {
     const { chromium } = await import("playwright");
     const browser = await chromium.launch({ headless: true });
-    for (const viewport of [
-      { width: 375, height: 900, label: "375px" },
-      { width: 768, height: 1000, label: "768px" },
-      { width: 1280, height: 900, label: "1280px" },
-    ]) {
-      const page = await browser.newPage({
-        viewport: { width: viewport.width, height: viewport.height },
-      });
-      await page.setContent(html, { waitUntil: "networkidle", timeout: 30000 });
-      const overflow = await page.evaluate(
-        () => document.documentElement.scrollWidth > window.innerWidth + 2,
-      );
-      if (overflow) issues.push(`Horizontal overflow at ${viewport.label}.`);
-      checkedViewports.push(viewport.label);
-      await page.close();
+    try {
+      for (const viewport of [
+        { width: 375, height: 900, label: "375px" },
+        { width: 768, height: 1000, label: "768px" },
+        { width: 1280, height: 900, label: "1280px" },
+      ]) {
+        const page = await browser.newPage({
+          viewport: { width: viewport.width, height: viewport.height },
+        });
+        try {
+          if (options?.signal?.aborted) {
+            throw new Error("Refinement request was cancelled");
+          }
+          const remainingMs = options?.deadlineAt
+            ? options.deadlineAt - Date.now()
+            : 30_000;
+          if (remainingMs <= 0) {
+            throw new Error("Refinement reached the route work deadline");
+          }
+          await page.setContent(html, {
+            waitUntil: "networkidle",
+            timeout: Math.max(1, Math.min(30_000, remainingMs)),
+          });
+          const overflow = await page.evaluate(
+            () => document.documentElement.scrollWidth > window.innerWidth + 2,
+          );
+          if (overflow) issues.push(`Horizontal overflow at ${viewport.label}.`);
+          checkedViewports.push(viewport.label);
+        } finally {
+          await page.close().catch(() => undefined);
+        }
+      }
+    } finally {
+      await browser.close().catch(() => undefined);
     }
-    await browser.close();
   } catch (err) {
+    if (options?.signal?.aborted) throw err;
     console.warn("[refine] Playwright QA skipped", err);
   }
 
@@ -242,6 +268,7 @@ export async function POST(req: Request) {
   }
 
   const startedAt = Date.now();
+  const routeWorkDeadlineAt = startedAt + ROUTE_WORK_DEADLINE_MS;
   const { protectedHtml, assets } = protectDataUrls(html);
   const prompt = buildPrompt({
     clientName,
@@ -263,11 +290,19 @@ export async function POST(req: Request) {
     });
     const text =
       provider === "openai"
-        ? await callOpenAI(apiKey, prompt)
+        ? await callOpenAI(
+            apiKey,
+            prompt,
+            req.signal,
+            routeWorkDeadlineAt,
+          )
         : await callAnthropic(apiKey, prompt);
     const revisedProtectedHtml = parseHtml(text, protectedHtml);
     const revisedHtml = restoreDataUrls(revisedProtectedHtml, assets);
-    const qaReport = await quickQa(revisedHtml);
+    const qaReport = await quickQa(revisedHtml, {
+      deadlineAt: routeWorkDeadlineAt,
+      signal: req.signal,
+    });
     console.log("[refine] success", {
       provider,
       qaPass: qaReport.pass,

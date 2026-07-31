@@ -7,9 +7,14 @@ import {
   getAnthropicMockupConfig,
   getOpenAIMockupConfig,
 } from "@/lib/ai-models";
+import { createAndPollOpenAIResponse } from "@/lib/openai-responses";
 
 export const runtime = "nodejs";
 export const maxDuration = 900;
+
+const ROUTE_WORK_DEADLINE_MS = 13 * 60 * 1_000;
+const MIN_QA_RENDER_BUDGET_MS = 100_000;
+const MIN_REPAIR_START_BUDGET_MS = 2 * 60 * 1_000;
 
 type Mockup = { name: string; html: string };
 type LogoBackground = "light" | "dark" | "either";
@@ -288,7 +293,11 @@ function buildResearchSummary(packet: ResearchPacket) {
     .join("\n");
 }
 
-async function scrapeFirecrawl(url: string, kind: "current" | "inspiration"): Promise<ResearchPage> {
+async function scrapeFirecrawl(
+  url: string,
+  kind: "current" | "inspiration",
+  options?: { deadlineAt?: number; signal?: AbortSignal },
+): Promise<ResearchPage> {
   const apiKey = process.env.FIRECRAWL_API_KEY;
   if (!apiKey) {
     return {
@@ -302,6 +311,22 @@ async function scrapeFirecrawl(url: string, kind: "current" | "inspiration"): Pr
       error: "FIRECRAWL_API_KEY not configured",
     };
   }
+
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort(options?.signal?.reason);
+  if (options?.signal?.aborted) forwardAbort();
+  options?.signal?.addEventListener("abort", forwardAbort, { once: true });
+  const remainingMs = options?.deadlineAt
+    ? options.deadlineAt - Date.now()
+    : 65_000;
+  if (remainingMs <= 0) {
+    options?.signal?.removeEventListener("abort", forwardAbort);
+    throw new Error("Generation reached the route work deadline");
+  }
+  const timeout = setTimeout(
+    () => controller.abort(),
+    Math.max(1, Math.min(65_000, remainingMs)),
+  );
 
   try {
     const res = await fetch("https://api.firecrawl.dev/v2/scrape", {
@@ -322,6 +347,7 @@ async function scrapeFirecrawl(url: string, kind: "current" | "inspiration"): Pr
         proxy: "auto",
         timeout: 60000,
       }),
+      signal: controller.signal,
     });
 
     const json = (await res.json().catch(() => null)) as {
@@ -346,6 +372,12 @@ async function scrapeFirecrawl(url: string, kind: "current" | "inspiration"): Pr
       branding: data.branding ?? null,
     };
   } catch (err) {
+    if (options?.signal?.aborted) throw err;
+    if (options?.deadlineAt && Date.now() >= options.deadlineAt) {
+      throw new Error("Generation reached the route work deadline", {
+        cause: err,
+      });
+    }
     return {
       url,
       kind,
@@ -356,13 +388,22 @@ async function scrapeFirecrawl(url: string, kind: "current" | "inspiration"): Pr
       branding: null,
       error: err instanceof Error ? err.message : "Firecrawl scrape failed",
     };
+  } finally {
+    clearTimeout(timeout);
+    options?.signal?.removeEventListener("abort", forwardAbort);
   }
 }
 
-async function buildResearchPacket(currentSite: string, urls: string[]): Promise<ResearchPacket> {
+async function buildResearchPacket(
+  currentSite: string,
+  urls: string[],
+  options?: { deadlineAt?: number; signal?: AbortSignal },
+): Promise<ResearchPacket> {
   const pages = await Promise.all([
-    currentSite ? scrapeFirecrawl(currentSite, "current") : Promise.resolve(undefined),
-    ...urls.map((url) => scrapeFirecrawl(url, "inspiration")),
+    currentSite
+      ? scrapeFirecrawl(currentSite, "current", options)
+      : Promise.resolve(undefined),
+    ...urls.map((url) => scrapeFirecrawl(url, "inspiration", options)),
   ]);
   const current = pages[0] as ResearchPage | undefined;
   const inspirations = pages.slice(1).filter((p): p is ResearchPage => Boolean(p));
@@ -394,8 +435,11 @@ async function generateWithOpenAI(args: {
   images?: ParsedImage[];
   useWebSearch?: boolean;
   maxOutputTokens?: number;
+  deadlineAt?: number;
+  signal?: AbortSignal;
 }) {
-  const { model, reasoningEffort, reasoningMode } = getOpenAIMockupConfig();
+  const { model, reasoningEffort, reasoningMode, serviceTier } =
+    getOpenAIMockupConfig();
   const content = [
     ...(args.images ?? []).map((s) => ({
       type: "input_image",
@@ -410,6 +454,7 @@ async function generateWithOpenAI(args: {
     input: [{ role: "user", content }],
     max_output_tokens: args.maxOutputTokens ?? MODEL_OUTPUT_TOKENS.mockups,
     reasoning: { effort: reasoningEffort, mode: reasoningMode },
+    service_tier: serviceTier,
     store: false,
   };
   if (args.useWebSearch) {
@@ -417,25 +462,12 @@ async function generateWithOpenAI(args: {
     body.max_tool_calls = 8;
   }
 
-  const res = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${args.apiKey}`,
-    },
-    body: JSON.stringify(body),
+  const json = await createAndPollOpenAIResponse({
+    apiKey: args.apiKey,
+    body,
+    deadlineAt: args.deadlineAt,
+    signal: args.signal,
   });
-
-  const json = (await res.json().catch(() => null)) as unknown;
-  if (!res.ok) {
-    const message =
-      json &&
-      typeof json === "object" &&
-      typeof (json as { error?: { message?: unknown } }).error?.message === "string"
-        ? (json as { error: { message: string } }).error.message
-        : `OpenAI API error (${res.status})`;
-    throw new Error(message);
-  }
   return extractOpenAIText(json);
 }
 
@@ -514,6 +546,8 @@ async function generateModelText(args: {
   images?: ParsedImage[];
   useProviderTools?: boolean;
   maxTokens?: number;
+  deadlineAt?: number;
+  signal?: AbortSignal;
 }) {
   if (args.provider === "openai") {
     return generateWithOpenAI({
@@ -522,6 +556,8 @@ async function generateModelText(args: {
       images: args.images,
       useWebSearch: args.useProviderTools,
       maxOutputTokens: args.maxTokens,
+      deadlineAt: args.deadlineAt,
+      signal: args.signal,
     });
   }
   return generateWithAnthropic({
@@ -790,25 +826,50 @@ function localQa(raw: Mockup, imageAssets: ClientImageAsset[]): MockupQAReport {
   };
 }
 
-async function renderMockupScreenshots(html: string) {
+async function renderMockupScreenshots(
+  html: string,
+  options?: { deadlineAt?: number; signal?: AbortSignal },
+) {
+  if (options?.signal?.aborted) {
+    throw new Error("Generation request was cancelled");
+  }
   try {
     const { chromium } = await import("playwright");
     const browser = await chromium.launch({ headless: true });
-    const shots: ParsedImage[] = [];
-    for (const viewport of [
-      { width: 375, height: 900, label: "mobile 375px" },
-      { width: 768, height: 1000, label: "tablet 768px" },
-      { width: 1280, height: 900, label: "desktop 1280px" },
-    ]) {
-      const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height } });
-      await page.setContent(html, { waitUntil: "networkidle", timeout: 30000 });
-      const buffer = await page.screenshot({ fullPage: false, type: "png" });
-      await page.close();
-      shots.push({ mediaType: "image/png", base64: buffer.toString("base64"), label: viewport.label });
+    try {
+      const shots: ParsedImage[] = [];
+      for (const viewport of [
+        { width: 375, height: 900, label: "mobile 375px" },
+        { width: 768, height: 1000, label: "tablet 768px" },
+        { width: 1280, height: 900, label: "desktop 1280px" },
+      ]) {
+        const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height } });
+        try {
+          if (options?.signal?.aborted) {
+            throw new Error("Generation request was cancelled");
+          }
+          const remainingMs = options?.deadlineAt
+            ? options.deadlineAt - Date.now()
+            : 30_000;
+          if (remainingMs <= 0) {
+            throw new Error("Generation reached the route work deadline");
+          }
+          await page.setContent(html, {
+            waitUntil: "networkidle",
+            timeout: Math.max(1, Math.min(30_000, remainingMs)),
+          });
+          const buffer = await page.screenshot({ fullPage: false, type: "png" });
+          shots.push({ mediaType: "image/png", base64: buffer.toString("base64"), label: viewport.label });
+        } finally {
+          await page.close().catch(() => undefined);
+        }
+      }
+      return shots;
+    } finally {
+      await browser.close().catch(() => undefined);
     }
-    await browser.close();
-    return shots;
   } catch (err) {
+    if (options?.signal?.aborted) throw err;
     console.warn("[generate] Playwright render QA skipped", err);
     return [];
   }
@@ -864,9 +925,26 @@ async function qaMockup(args: {
   raw: Mockup;
   injected: Mockup;
   imageAssets: ClientImageAsset[];
+  deadlineAt?: number;
+  signal?: AbortSignal;
 }) {
   const local = localQa(args.raw, args.imageAssets);
-  const rendered = await renderMockupScreenshots(args.injected.html);
+  if (args.signal?.aborted) {
+    throw new Error("Generation request was cancelled");
+  }
+  if (
+    args.deadlineAt &&
+    args.deadlineAt - Date.now() < MIN_QA_RENDER_BUDGET_MS
+  ) {
+    console.warn("[generate] model QA skipped to preserve route deadline", {
+      mockup: args.raw.name,
+    });
+    return local;
+  }
+  const rendered = await renderMockupScreenshots(args.injected.html, {
+    deadlineAt: args.deadlineAt,
+    signal: args.signal,
+  });
   if (rendered.length === 0) return local;
 
   try {
@@ -876,6 +954,8 @@ async function qaMockup(args: {
       prompt: buildQaPrompt(args.raw.name, local),
       images: rendered,
       maxTokens: MODEL_OUTPUT_TOKENS.qa,
+      deadlineAt: args.deadlineAt,
+      signal: args.signal,
     });
     const qa = parseQa(text, local);
     if (!local.pass) {
@@ -888,6 +968,7 @@ async function qaMockup(args: {
     }
     return qa;
   } catch (err) {
+    if (args.signal?.aborted) throw err;
     console.warn("[generate] model QA failed", err);
     return local;
   }
@@ -928,6 +1009,7 @@ function parseSingleHtmlBlock(text: string, fallback: Mockup) {
 
 export async function POST(req: Request) {
   const startedAt = Date.now();
+  const routeWorkDeadlineAt = startedAt + ROUTE_WORK_DEADLINE_MS;
   let body: RequestBody;
   try {
     body = (await req.json()) as RequestBody;
@@ -1025,6 +1107,8 @@ export async function POST(req: Request) {
     reasoningEffort: modelConfig.reasoningEffort,
     reasoningMode:
       "reasoningMode" in modelConfig ? modelConfig.reasoningMode : undefined,
+    serviceTier:
+      "serviceTier" in modelConfig ? modelConfig.serviceTier : undefined,
     clientName,
     currentSite: currentSite || null,
     inspirationUrls: cleanedUrls.length,
@@ -1036,7 +1120,10 @@ export async function POST(req: Request) {
 
   try {
     console.log("[generate] stage=research");
-    const research = await buildResearchPacket(currentSite, cleanedUrls);
+    const research = await buildResearchPacket(currentSite, cleanedUrls, {
+      deadlineAt: routeWorkDeadlineAt,
+      signal: req.signal,
+    });
     const useProviderTools = research.source !== "firecrawl";
     const researchImages = firecrawlScreenshotInputs(research);
 
@@ -1068,6 +1155,8 @@ export async function POST(req: Request) {
       images: [...parsedScreenshots, ...researchImages].slice(0, 7),
       useProviderTools,
       maxTokens: MODEL_OUTPUT_TOKENS.directions,
+      deadlineAt: routeWorkDeadlineAt,
+      signal: req.signal,
     });
     const analysis = parseAnalysis(analysisText, clientName);
 
@@ -1094,6 +1183,8 @@ export async function POST(req: Request) {
       images: [...parsedScreenshots, ...researchImages].slice(0, 7),
       useProviderTools,
       maxTokens: MODEL_OUTPUT_TOKENS.mockups,
+      deadlineAt: routeWorkDeadlineAt,
+      signal: req.signal,
     });
     const rawMockups = parseMockupsFromText(htmlText);
     let injectedMockups = injectUploadedAssets(rawMockups, logoDataUrl, clientImages, legacyHeroPhoto);
@@ -1107,6 +1198,8 @@ export async function POST(req: Request) {
           raw,
           injected: injectedMockups[i],
           imageAssets: clientImages,
+          deadlineAt: routeWorkDeadlineAt,
+          signal: req.signal,
         }),
       ),
     );
@@ -1116,34 +1209,59 @@ export async function POST(req: Request) {
       .filter(({ qa }) => !qa.pass || qa.score < 82)
       .map(({ i }) => i);
 
-    if (failingIndexes.length > 0 && MAX_REPAIR_PASSES > 0) {
+    if (
+      failingIndexes.length > 0 &&
+      MAX_REPAIR_PASSES > 0 &&
+      routeWorkDeadlineAt - Date.now() >= MIN_REPAIR_START_BUDGET_MS
+    ) {
       console.log("[generate] stage=repair", { failingIndexes });
+      let repairedAny = false;
       for (const i of failingIndexes) {
-        const repairText = await generateModelText({
-          provider,
-          apiKey,
-          prompt: buildRepairPrompt({
-            raw: rawMockups[i],
-            qa: qaReports[i],
-            imageAssets: clientImages,
-            logoBackground,
-          }),
-          maxTokens: MODEL_OUTPUT_TOKENS.repair,
-        });
-        rawMockups[i] = parseSingleHtmlBlock(repairText, rawMockups[i]);
-      }
-      injectedMockups = injectUploadedAssets(rawMockups, logoDataUrl, clientImages, legacyHeroPhoto);
-      qaReports = await Promise.all(
-        rawMockups.map((raw, i) =>
-          qaMockup({
+        try {
+          const repairText = await generateModelText({
             provider,
             apiKey,
-            raw,
-            injected: injectedMockups[i],
-            imageAssets: clientImages,
-          }),
-        ),
-      );
+            prompt: buildRepairPrompt({
+              raw: rawMockups[i],
+              qa: qaReports[i],
+              imageAssets: clientImages,
+              logoBackground,
+            }),
+            maxTokens: MODEL_OUTPUT_TOKENS.repair,
+            deadlineAt: routeWorkDeadlineAt,
+            signal: req.signal,
+          });
+          rawMockups[i] = parseSingleHtmlBlock(repairText, rawMockups[i]);
+          repairedAny = true;
+        } catch (err) {
+          if (req.signal.aborted) throw err;
+          console.warn("[generate] repair skipped after model failure", {
+            mockup: rawMockups[i].name,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          break;
+        }
+      }
+      if (repairedAny) {
+        injectedMockups = injectUploadedAssets(rawMockups, logoDataUrl, clientImages, legacyHeroPhoto);
+        qaReports = await Promise.all(
+          rawMockups.map((raw, i) =>
+            qaMockup({
+              provider,
+              apiKey,
+              raw,
+              injected: injectedMockups[i],
+              imageAssets: clientImages,
+              deadlineAt: routeWorkDeadlineAt,
+              signal: req.signal,
+            }),
+          ),
+        );
+      }
+    } else if (failingIndexes.length > 0) {
+      console.warn("[generate] repair skipped to preserve route deadline", {
+        failingIndexes,
+      });
     }
 
     const placeholderCounts = rawMockups.map((m) => countPlaceholderUses(m, clientImages));
@@ -1166,6 +1284,8 @@ export async function POST(req: Request) {
       usedReasoningEffort: modelConfig.reasoningEffort,
       usedReasoningMode:
         "reasoningMode" in modelConfig ? modelConfig.reasoningMode : undefined,
+      usedServiceTier:
+        "serviceTier" in modelConfig ? modelConfig.serviceTier : undefined,
       usedResearchSource: research.source,
     });
   } catch (err) {

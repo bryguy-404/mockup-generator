@@ -28,6 +28,7 @@ Fill in the form, choose a generation engine, and click **Generate Mockups**. Pr
    - `OPENAI_MOCKUP_MODEL` = `gpt-5.6-sol` (optional override)
    - `OPENAI_REASONING_EFFORT` = `max` (optional override)
    - `OPENAI_REASONING_MODE` = `pro` (optional override)
+   - `OPENAI_SERVICE_TIER` = `fast` (optional override; premium lower-latency processing)
    - `ANTHROPIC_MOCKUP_MODEL` = `claude-fable-5` (optional override)
    - `ANTHROPIC_EXPORT_MODEL` = `claude-fable-5` (optional override)
    - `ANTHROPIC_REASONING_EFFORT` = `max` (optional override)
@@ -42,7 +43,8 @@ Fill in the form, choose a generation engine, and click **Generate Mockups**. Pr
 
 ## Notes
 
-- The generation, refinement, and export routes set `maxDuration = 900` to accommodate max-effort premium generations.
+- OpenAI calls use background Responses API jobs with status polling so long Pro/max runs do not hit Node's five-minute response-header timeout. Polling defaults to every 2 seconds with a 30-minute library ceiling, additionally capped by the route's remaining work budget; timing can be overridden with `OPENAI_BACKGROUND_POLL_INTERVAL_MS`, `OPENAI_BACKGROUND_MAX_WAIT_MS`, and `OPENAI_HTTP_REQUEST_TIMEOUT_MS`.
+- The generation, refinement, and export routes set `maxDuration = 900` to accommodate max-effort premium generations. The OpenAI generation and refinement paths reserve the final two minutes of that window for cleanup and returning the result; optional visual QA or repair work is skipped when too little time remains.
 - Firecrawl uses `/v2/scrape` for markdown, screenshots, links/images, and branding. If Firecrawl is missing or fails for a URL, the selected model can still use provider web tools.
 - Playwright is used server-side for QA screenshots. If browser rendering fails in an environment, generation continues with static QA checks instead of crashing.
 - Mockups render in iframes with `sandbox="allow-scripts"` so the Tailwind CDN can apply styles, but the iframe origin stays null and can't reach the host page.

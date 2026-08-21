@@ -8,6 +8,12 @@ import {
   getOpenAIMockupConfig,
 } from "@/lib/ai-models";
 import { createAndPollOpenAIResponse } from "@/lib/openai-responses";
+import {
+  buildResearchPacket,
+  buildResearchSummary,
+  type ResearchPacket,
+  type ResearchPage,
+} from "@/lib/research";
 
 export const runtime = "nodejs";
 export const maxDuration = 900;
@@ -35,22 +41,6 @@ type ClientImageAsset = {
   name: string;
   role: ClientImageRole;
   dataUrl: string;
-};
-type ResearchPage = {
-  url: string;
-  kind: "current" | "inspiration";
-  source: "firecrawl" | "provider-tools";
-  markdown: string;
-  screenshotDataUrl?: string;
-  links: string[];
-  images: string[];
-  branding: unknown;
-  error?: string;
-};
-type ResearchPacket = {
-  currentSite?: ResearchPage;
-  inspirations: ResearchPage[];
-  source: "firecrawl" | "provider-tools" | "mixed";
 };
 type CreativeDirection = {
   name: string;
@@ -281,141 +271,6 @@ function parseClientImages(value: unknown): ClientImageAsset[] {
     }
     return { id, name, role, dataUrl: v.dataUrl };
   });
-}
-
-function buildResearchSummary(packet: ResearchPacket) {
-  const pages = [packet.currentSite, ...packet.inspirations].filter(Boolean) as ResearchPage[];
-  return pages
-    .map((p) => {
-      const status = p.error ? `FAILED: ${p.error}` : `${p.markdown.length} chars`;
-      return `${p.kind.toUpperCase()} ${p.url} (${p.source}) ${status}`;
-    })
-    .join("\n");
-}
-
-async function scrapeFirecrawl(
-  url: string,
-  kind: "current" | "inspiration",
-  options?: { deadlineAt?: number; signal?: AbortSignal },
-): Promise<ResearchPage> {
-  const apiKey = process.env.FIRECRAWL_API_KEY;
-  if (!apiKey) {
-    return {
-      url,
-      kind,
-      source: "provider-tools",
-      markdown: "",
-      links: [],
-      images: [],
-      branding: null,
-      error: "FIRECRAWL_API_KEY not configured",
-    };
-  }
-
-  const controller = new AbortController();
-  const forwardAbort = () => controller.abort(options?.signal?.reason);
-  if (options?.signal?.aborted) forwardAbort();
-  options?.signal?.addEventListener("abort", forwardAbort, { once: true });
-  const remainingMs = options?.deadlineAt
-    ? options.deadlineAt - Date.now()
-    : 65_000;
-  if (remainingMs <= 0) {
-    options?.signal?.removeEventListener("abort", forwardAbort);
-    throw new Error("Generation reached the route work deadline");
-  }
-  const timeout = setTimeout(
-    () => controller.abort(),
-    Math.max(1, Math.min(65_000, remainingMs)),
-  );
-
-  try {
-    const res = await fetch("https://api.firecrawl.dev/v2/scrape", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url,
-        formats:
-          kind === "current"
-            ? ["markdown", "screenshot", "links", "images", "branding"]
-            : ["markdown", "screenshot", "branding"],
-        onlyMainContent: true,
-        removeBase64Images: true,
-        blockAds: true,
-        proxy: "auto",
-        timeout: 60000,
-      }),
-      signal: controller.signal,
-    });
-
-    const json = (await res.json().catch(() => null)) as {
-      success?: boolean;
-      data?: Record<string, unknown>;
-      error?: string;
-    } | null;
-    if (!res.ok || !json?.success || !json.data) {
-      throw new Error(json?.error || `Firecrawl error (${res.status})`);
-    }
-    const data = json.data;
-    return {
-      url,
-      kind,
-      source: "firecrawl",
-      markdown: truncate(typeof data.markdown === "string" ? data.markdown : ""),
-      screenshotDataUrl: typeof data.screenshot === "string" && data.screenshot.startsWith("data:image/")
-        ? data.screenshot
-        : undefined,
-      links: Array.isArray(data.links) ? data.links.filter((x): x is string => typeof x === "string").slice(0, 30) : [],
-      images: Array.isArray(data.images) ? data.images.filter((x): x is string => typeof x === "string").slice(0, 30) : [],
-      branding: data.branding ?? null,
-    };
-  } catch (err) {
-    if (options?.signal?.aborted) throw err;
-    if (options?.deadlineAt && Date.now() >= options.deadlineAt) {
-      throw new Error("Generation reached the route work deadline", {
-        cause: err,
-      });
-    }
-    return {
-      url,
-      kind,
-      source: "provider-tools",
-      markdown: "",
-      links: [],
-      images: [],
-      branding: null,
-      error: err instanceof Error ? err.message : "Firecrawl scrape failed",
-    };
-  } finally {
-    clearTimeout(timeout);
-    options?.signal?.removeEventListener("abort", forwardAbort);
-  }
-}
-
-async function buildResearchPacket(
-  currentSite: string,
-  urls: string[],
-  options?: { deadlineAt?: number; signal?: AbortSignal },
-): Promise<ResearchPacket> {
-  const pages = await Promise.all([
-    currentSite
-      ? scrapeFirecrawl(currentSite, "current", options)
-      : Promise.resolve(undefined),
-    ...urls.map((url) => scrapeFirecrawl(url, "inspiration", options)),
-  ]);
-  const current = pages[0] as ResearchPage | undefined;
-  const inspirations = pages.slice(1).filter((p): p is ResearchPage => Boolean(p));
-  const all = [current, ...inspirations].filter(Boolean) as ResearchPage[];
-  const firecrawlCount = all.filter((p) => p.source === "firecrawl").length;
-  const source =
-    firecrawlCount === all.length && all.length > 0
-      ? "firecrawl"
-      : firecrawlCount > 0
-        ? "mixed"
-        : "provider-tools";
-  return { currentSite: current, inspirations, source };
 }
 
 function firecrawlScreenshotInputs(packet: ResearchPacket): ParsedImage[] {

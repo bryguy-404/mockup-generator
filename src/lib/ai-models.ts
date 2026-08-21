@@ -1,11 +1,14 @@
 export const DEFAULT_OPENAI_MODEL = "gpt-5.6-sol";
+export const DEFAULT_OPENAI_INTAKE_MODEL = "gpt-5.6-terra";
 export const DEFAULT_ANTHROPIC_MODEL = "claude-fable-5";
 export const DEFAULT_OPENAI_REASONING_EFFORT = "max";
 export const DEFAULT_OPENAI_REASONING_MODE = "pro";
 export const DEFAULT_OPENAI_SERVICE_TIER = "fast";
 export const DEFAULT_ANTHROPIC_REASONING_EFFORT = "max";
+export const DEFAULT_OPENAI_INTAKE_REASONING_EFFORT = "medium";
 
 export const MODEL_OUTPUT_TOKENS = {
+  intake: 16_000,
   directions: 64_000,
   mockups: 128_000,
   qa: 64_000,
@@ -76,6 +79,17 @@ export function getOpenAIMockupConfig() {
       "OPENAI_SERVICE_TIER",
       OPENAI_SERVICE_TIERS,
       DEFAULT_OPENAI_SERVICE_TIER,
+    ),
+  };
+}
+
+export function getOpenAIIntakeConfig() {
+  return {
+    model: readString("OPENAI_INTAKE_MODEL", DEFAULT_OPENAI_INTAKE_MODEL),
+    reasoningEffort: readChoice(
+      "OPENAI_INTAKE_REASONING_EFFORT",
+      OPENAI_REASONING_EFFORTS,
+      DEFAULT_OPENAI_INTAKE_REASONING_EFFORT,
     ),
   };
 }

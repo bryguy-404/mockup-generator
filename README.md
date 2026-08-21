@@ -1,6 +1,6 @@
 # Mockup Generator
 
-A single-page Next.js app that generates three distinct premium homepage mockups for a client. You provide inspiration URLs, current-site URL, logo, client business photos, screenshots, project direction, brand colors, and client name. The app uses a staged workflow: Firecrawl research, AI creative directions, mockup generation, Playwright visual QA, and one repair pass. Results are standalone HTML files (Tailwind via CDN) rendered in iframes with per-mockup refinement, download, share, and handoff buttons.
+A single-page Next.js app that generates three distinct premium homepage mockups for a client. Start with the optional AI Brief to describe the project conversationally, paste website links, and attach images; GPT-5.6 Terra researches the sites and prepares an evidence-backed form draft for review. You can also use the manual intake directly. The app then runs Firecrawl research, AI creative directions, mockup generation, Playwright visual QA, and one repair pass. Results are standalone HTML files (Tailwind via CDN) rendered in iframes with per-mockup refinement, download, share, and handoff buttons.
 
 ## Local setup
 
@@ -26,6 +26,8 @@ Fill in the form, choose a generation engine, and click **Generate Mockups**. Pr
    - `OPENAI_API_KEY` = your OpenAI API key (needed for the OpenAI engine)
    - `FIRECRAWL_API_KEY` = your Firecrawl API key (recommended; falls back to provider web tools if omitted)
    - `OPENAI_MOCKUP_MODEL` = `gpt-5.6-sol` (optional override)
+   - `OPENAI_INTAKE_MODEL` = `gpt-5.6-terra` (optional AI Brief override)
+   - `OPENAI_INTAKE_REASONING_EFFORT` = `medium` (optional AI Brief override)
    - `OPENAI_REASONING_EFFORT` = `max` (optional override)
    - `OPENAI_REASONING_MODE` = `pro` (optional override)
    - `OPENAI_SERVICE_TIER` = `fast` (optional override; premium lower-latency processing)
@@ -36,7 +38,8 @@ Fill in the form, choose a generation engine, and click **Generate Mockups**. Pr
 
 ## How it works
 
-- `src/app/page.tsx` — client component with the form and results grid. Client photos and screenshots are compressed in-browser to about 1800px max dimension and a 1.5MB cap before being sent as data URLs. Each client image can be tagged as hero, services, team, gallery, or general. The direction step includes a form-needed selector so generated mockups can intentionally include or avoid contact, quote, booking, newsletter, or custom lead forms.
+- `src/app/page.tsx` — client component with the manual form and results grid. The optional AI Brief step supports a one-shot brief plus conversational follow-ups, sourced/confidence-rated draft values, attachment role review, explicit apply, and session-only history. Client photos and screenshots are compressed in-browser to about 1800px max dimension and a 1.5MB cap before being sent as data URLs.
+- `src/app/api/intake/route.ts` — validates the AI Brief conversation and images, reuses Firecrawl research, calls GPT-5.6 Terra with strict structured output, and returns a reviewable draft without mutating the manual form. If Firecrawl fails, Terra can use web search with a reduced-confidence warning.
 - `src/app/api/generate/route.ts` — premium server route that validates inputs, uses Firecrawl for shared research when configured, asks the selected provider for brand/inspiration analysis and creative directions, generates mockups, renders them with Playwright at mobile/tablet/desktop sizes, runs model QA, and repairs failing concepts once. Anthropic defaults to Claude Fable 5 at max effort. OpenAI defaults to GPT-5.6 Sol in Pro mode at max effort.
 - `src/app/api/refine/route.ts` — targeted per-mockup refinement route. It protects embedded image data, asks the selected provider to revise one HTML mockup from the user's edit notes, restores the images, and runs a quick responsive overflow QA check.
 - `src/app/api/export/route.ts` — server route behind **Use This Design**. It creates the AI handoff bundle: `CLAUDE_KICKOFF.md`, `BUILD_PROMPT.md`, `BLUEPRINT.md`, `theme.config.ts`, and `design/index.html`. The kickoff scaffold defaults to static Astro for Cloudflare Pages (`npm run build`, output `dist`) and avoids the Cloudflare adapter/Wrangler path unless server runtime features are explicitly needed. If a generated design includes a contact or lead form, the build prompt instructs the agent to use a Cloudflare Pages Function at `functions/api/contact.ts` with Resend secrets read from the function environment.
@@ -46,6 +49,8 @@ Fill in the form, choose a generation engine, and click **Generate Mockups**. Pr
 - OpenAI calls use background Responses API jobs with status polling so long Pro/max runs do not hit Node's five-minute response-header timeout. Polling defaults to every 2 seconds with a 30-minute library ceiling, additionally capped by the route's remaining work budget; timing can be overridden with `OPENAI_BACKGROUND_POLL_INTERVAL_MS`, `OPENAI_BACKGROUND_MAX_WAIT_MS`, and `OPENAI_HTTP_REQUEST_TIMEOUT_MS`.
 - The generation, refinement, and export routes set `maxDuration = 900` to accommodate max-effort premium generations. The OpenAI generation and refinement paths reserve the final two minutes of that window for cleanup and returning the result; optional visual QA or repair work is skipped when too little time remains.
 - Firecrawl uses `/v2/scrape` for markdown, screenshots, links/images, and branding. If Firecrawl is missing or fails for a URL, the selected model can still use provider web tools.
+- Firecrawl research is shared through a bounded 100-entry, 30-minute in-memory cache. The cache is best effort and safely refetches after process restarts.
+- Website logos and images found during AI Brief research are suggestions only. Confirmed imports pass through server-side URL, DNS, redirect, size, MIME, and SVG sanitization checks before being added to the form.
 - Playwright is used server-side for QA screenshots. If browser rendering fails in an environment, generation continues with static QA checks instead of crashing.
 - Mockups render in iframes with `sandbox="allow-scripts"` so the Tailwind CDN can apply styles, but the iframe origin stays null and can't reach the host page.
 - Each generation has provider costs: Firecrawl credits, model input/output tokens, vision inputs for QA, and any hosted web tool usage.

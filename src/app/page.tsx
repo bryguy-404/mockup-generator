@@ -2,6 +2,12 @@
 
 import Image from "next/image";
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
+import AIIntakeStep, { type IntakeUiState } from "@/app/AIIntakeStep";
+import {
+  type ExistingIntakeForm,
+  type IntakeAttachment,
+  type RemoteAssetCandidate,
+} from "@/lib/intake";
 
 type Mockup = { name: string; html: string };
 type Screenshot = { name: string; dataUrl: string };
@@ -57,6 +63,7 @@ type RefineQAReport = {
 };
 
 const STORAGE_KEY = "mockup-generator:state";
+const INTAKE_STORAGE_KEY = "mockup-generator:ai-intake";
 const MAX_SCREENSHOTS = 3;
 const MAX_CLIENT_IMAGES = 12;
 const MAX_COMPRESSED_IMAGE_BYTES = 1.5 * 1024 * 1024;
@@ -65,6 +72,11 @@ const HOSTED_BODY_LIMIT_HINT_BYTES = 4 * 1024 * 1024;
 const IMAGE_QUALITY = 0.82;
 const IMAGE_MAX_DIMENSION = 1800;
 const INTAKE_STEPS = [
+  {
+    id: "ai-brief",
+    title: "AI Brief",
+    description: "Talk through the project, add links and images, and review a draft.",
+  },
   {
     id: "basics",
     title: "Client Basics",
@@ -171,6 +183,17 @@ type PersistedState = {
   shareLinks: Record<number, ShareLink>;
 };
 
+const EMPTY_INTAKE_STATE: IntakeUiState = {
+  composer: "",
+  messages: [],
+  attachments: [],
+  draft: null,
+  warnings: [],
+  missingRequired: [],
+  researchContext: null,
+  attachmentRoles: {},
+};
+
 export default function Home() {
   const [urls, setUrls] = useState<[string, string, string]>(["", "", ""]);
   const [currentSite, setCurrentSite] = useState("");
@@ -226,6 +249,8 @@ export default function Home() {
     Record<number, RefineQAReport>
   >({});
   const [currentStep, setCurrentStep] = useState(0);
+  const [maxUnlockedStep, setMaxUnlockedStep] = useState(0);
+  const [intakeState, setIntakeState] = useState<IntakeUiState>(EMPTY_INTAKE_STATE);
 
   useEffect(() => {
     try {
@@ -347,6 +372,42 @@ export default function Home() {
       // corrupted state — ignore
     }
   }, []);
+
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(INTAKE_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as Partial<IntakeUiState>;
+      setIntakeState({
+        ...EMPTY_INTAKE_STATE,
+        ...saved,
+        composer: typeof saved.composer === "string" ? saved.composer : "",
+        messages: Array.isArray(saved.messages) ? saved.messages.slice(-20) : [],
+        attachments: Array.isArray(saved.attachments) ? saved.attachments.slice(0, 12) : [],
+        warnings: Array.isArray(saved.warnings) ? saved.warnings.slice(0, 12) : [],
+        missingRequired: Array.isArray(saved.missingRequired)
+          ? saved.missingRequired
+          : [],
+        attachmentRoles:
+          saved.attachmentRoles && typeof saved.attachmentRoles === "object"
+            ? saved.attachmentRoles
+            : {},
+      });
+    } catch {
+      // Corrupted or quota-truncated intake state — start fresh.
+    }
+  }, []);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      try {
+        sessionStorage.setItem(INTAKE_STORAGE_KEY, JSON.stringify(intakeState));
+      } catch (storageError) {
+        console.warn("Could not persist AI Brief state", storageError);
+      }
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [intakeState]);
 
   useEffect(() => {
     if (!isLoading) {
@@ -478,6 +539,163 @@ export default function Home() {
       throw new Error(`${file.name} is still over 1.5MB after compression`);
     }
     return { dataUrl, bytes };
+  }
+
+  async function prepareIntakeFiles(files: File[]): Promise<IntakeAttachment[]> {
+    const prepared: IntakeAttachment[] = [];
+    const errors: string[] = [];
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      try {
+        const compressed = /logo|brandmark|wordmark/i.test(file.name)
+          ? await compressLogoFile(file)
+          : await compressImageFile(file);
+        prepared.push({
+          id: `intake_${Date.now().toString(36)}_${index}_${Math.random()
+            .toString(36)
+            .slice(2, 8)}`,
+          name: file.name,
+          dataUrl: compressed.dataUrl,
+          originalBytes: file.size,
+          compressedBytes: compressed.bytes,
+        });
+      } catch (caught) {
+        errors.push(caught instanceof Error ? caught.message : `${file.name} failed`);
+      }
+    }
+    if (errors.length && !prepared.length) throw new Error(errors.join("; "));
+    if (errors.length) setError(errors.join("; "));
+    return prepared;
+  }
+
+  function applyIntakeDraft(state: IntakeUiState) {
+    const draft = state.draft;
+    if (!draft) return;
+    if (draft.clientName.value) setClientName(draft.clientName.value);
+    if (draft.currentSite.value) setCurrentSite(draft.currentSite.value);
+    if (draft.inspirationUrls.value) {
+      setUrls([
+        draft.inspirationUrls.value[0] ?? "",
+        draft.inspirationUrls.value[1] ?? "",
+        draft.inspirationUrls.value[2] ?? "",
+      ]);
+    }
+    if (draft.brandColor.value) setBrandColor(draft.brandColor.value);
+    if (draft.projectBrief.value) setProjectBrief(draft.projectBrief.value);
+    if (draft.audience.value) setAudience(draft.audience.value);
+    if (draft.goals.value) setGoals(draft.goals.value);
+    if (draft.mustHaves.value) setMustHaves(draft.mustHaves.value);
+    if (draft.formRequirement.value) setFormRequirement(draft.formRequirement.value);
+    if (draft.formDetails.value) setFormDetails(draft.formDetails.value);
+    if (draft.avoidList.value) setAvoidList(draft.avoidList.value);
+    if (draft.compNotes.value) setCompNotes(draft.compNotes.value);
+    if (draft.styleNotes.value) setStyleNotes(draft.styleNotes.value);
+    if (draft.heroDirection.value) setHeroDirection(draft.heroDirection.value);
+    if (draft.logoBackground.value) setLogoBackground(draft.logoBackground.value);
+
+    const nextScreenshots: Screenshot[] = [];
+    const nextClientImages: ClientImageAsset[] = [];
+    let appliedLogo = false;
+    for (const attachment of state.attachments) {
+      const role = state.attachmentRoles[attachment.id] ?? "unknown";
+      if (role === "logo") {
+        if (!appliedLogo) {
+          setLogoDataUrl(attachment.dataUrl);
+          setLogoFileName(
+            `${attachment.name} (${formatBytes(attachment.originalBytes)} → ${formatBytes(attachment.compressedBytes)})`,
+          );
+          appliedLogo = true;
+        }
+      } else if (role === "inspiration") {
+        nextScreenshots.push({ name: attachment.name, dataUrl: attachment.dataUrl });
+      } else if (
+        role === "hero" ||
+        role === "services" ||
+        role === "team" ||
+        role === "gallery" ||
+        role === "general"
+      ) {
+        nextClientImages.push({
+          id: attachment.id.replace(/^intake_/, "asset_"),
+          name: attachment.name,
+          role,
+          dataUrl: attachment.dataUrl,
+          originalBytes: attachment.originalBytes,
+          compressedBytes: attachment.compressedBytes,
+        });
+      }
+    }
+    if (nextScreenshots.length) {
+      setScreenshots((previous) => {
+        const seen = new Set(previous.map((item) => `${item.name}:${item.dataUrl.length}`));
+        return [
+          ...previous,
+          ...nextScreenshots.filter((item) => !seen.has(`${item.name}:${item.dataUrl.length}`)),
+        ].slice(0, MAX_SCREENSHOTS);
+      });
+    }
+    if (nextClientImages.length) {
+      setClientImages((previous) => {
+        const seen = new Set(previous.map((item) => item.id));
+        return [...previous, ...nextClientImages.filter((item) => !seen.has(item.id))].slice(
+          0,
+          MAX_CLIENT_IMAGES,
+        );
+      });
+    }
+    const appliedAt = Date.now();
+    const remainingMissing = state.missingRequired.filter((item) => {
+      if (item === "clientName") return !draft.clientName.value && !clientName.trim();
+      if (item === "logo") return !appliedLogo && !logoDataUrl;
+      return !draft.inspirationUrls.value?.length && !urls.some((url) => url.trim());
+    });
+    setIntakeState((previous) => ({
+      ...previous,
+      appliedAt,
+      missingRequired: remainingMissing,
+    }));
+    setMaxUnlockedStep(INTAKE_STEPS.length - 1);
+    setCurrentStep(1);
+    setError(null);
+  }
+
+  async function importRemoteAsset(candidate: RemoteAssetCandidate) {
+    const response = await fetch("/api/intake/asset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: candidate.url }),
+    });
+    const data = await readJsonResponse<{
+      name?: string;
+      dataUrl?: string;
+      bytes?: number;
+      error?: string;
+    }>(response, "Could not import website image");
+    if (!response.ok || typeof data.dataUrl !== "string") {
+      throw new Error(errorFromPayload(data, "Could not import website image"));
+    }
+    const name = typeof data.name === "string" ? data.name : candidate.label;
+    const bytes = typeof data.bytes === "number" ? data.bytes : dataUrlByteLength(data.dataUrl);
+    if (candidate.kind === "logo") {
+      setLogoDataUrl(data.dataUrl);
+      setLogoFileName(`${name} (${formatBytes(bytes)}, imported from website)`);
+      setIntakeState((previous) => ({
+        ...previous,
+        missingRequired: previous.missingRequired.filter((item) => item !== "logo"),
+      }));
+      return;
+    }
+    setClientImages((previous) => [
+      ...previous,
+      {
+        id: `remote_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+        name,
+        role: "general" as const,
+        dataUrl: data.dataUrl!,
+        originalBytes: bytes,
+        compressedBytes: bytes,
+      },
+    ].slice(0, MAX_CLIENT_IMAGES));
   }
 
   function formatBytes(bytes: number) {
@@ -688,19 +906,19 @@ export default function Home() {
 
     if (!logoDataUrl) {
       setError("Please upload a logo image");
-      setCurrentStep(0);
+      setCurrentStep(1);
       return;
     }
 
     if (!clientName.trim()) {
       setError("Please enter a client name");
-      setCurrentStep(0);
+      setCurrentStep(1);
       return;
     }
 
     if (!firstInspirationUrl) {
       setError("Please add at least one inspiration URL");
-      setCurrentStep(2);
+      setCurrentStep(3);
       return;
     }
 
@@ -1096,9 +1314,32 @@ export default function Home() {
   const selectedFormOption =
     FORM_REQUIREMENT_OPTIONS.find((opt) => opt.id === formRequirement) ??
     FORM_REQUIREMENT_OPTIONS[0];
+  const existingIntakeForm: ExistingIntakeForm = {
+    clientName,
+    currentSite,
+    urls,
+    brandColor,
+    projectBrief,
+    audience,
+    goals,
+    mustHaves,
+    formRequirement,
+    formDetails,
+    avoidList,
+    compNotes,
+    styleNotes,
+    heroDirection,
+    logoBackground,
+    hasLogo: Boolean(logoDataUrl),
+  };
   const firstInspirationUrl = urls[0].trim();
   const canLeaveBasics = Boolean(clientName.trim() && logoDataUrl);
   const canLeaveInspiration = Boolean(firstInspirationUrl);
+  const generationMissing = [
+    ...(!clientName.trim() ? [{ label: "Client name", step: 1 }] : []),
+    ...(!logoDataUrl ? [{ label: "Uploaded logo", step: 1 }] : []),
+    ...(!firstInspirationUrl ? [{ label: "Inspiration URL", step: 3 }] : []),
+  ];
   const stepReady =
     activeStepId === "basics"
       ? canLeaveBasics
@@ -1110,7 +1351,7 @@ export default function Home() {
     if (index === currentStep) return "Current";
     return "Upcoming";
   };
-  const canVisitStep = (index: number) => index <= currentStep;
+  const canVisitStep = (index: number) => index <= maxUnlockedStep;
   const nextBlockedMessage =
     activeStepId === "basics"
       ? "Add a client name and logo before continuing."
@@ -1125,7 +1366,11 @@ export default function Home() {
 
   function goNext() {
     if (!stepReady) return;
-    setCurrentStep((prev) => Math.min(INTAKE_STEPS.length - 1, prev + 1));
+    setCurrentStep((previous) => {
+      const next = Math.min(INTAKE_STEPS.length - 1, previous + 1);
+      setMaxUnlockedStep((unlocked) => Math.max(unlocked, next));
+      return next;
+    });
   }
 
   return (
@@ -1173,7 +1418,7 @@ export default function Home() {
             </span>
           </div>
 
-          <div className="mb-6 grid grid-cols-1 gap-2 md:grid-cols-5">
+          <div className="mb-6 grid grid-cols-1 gap-2 md:grid-cols-3 xl:grid-cols-6">
             {INTAKE_STEPS.map((step, index) => {
               const selected = index === currentStep;
               const locked = !canVisitStep(index);
@@ -1212,6 +1457,21 @@ export default function Home() {
           </div>
 
           <div className="space-y-6">
+            <div className={activeStepId === "ai-brief" ? "" : "hidden"}>
+              <AIIntakeStep
+                state={intakeState}
+                onChange={setIntakeState}
+                existingForm={existingIntakeForm}
+                prepareFiles={prepareIntakeFiles}
+                onApply={applyIntakeDraft}
+                onSkip={() => {
+                  setMaxUnlockedStep((previous) => Math.max(previous, 1));
+                  setCurrentStep(1);
+                }}
+                onImportRemoteAsset={importRemoteAsset}
+              />
+            </div>
+
             <fieldset
               className={`rounded-2xl border border-slate-200/70 bg-white/60 p-4 sm:p-5 ${
                 activeStepId === "generate" ? "" : "hidden"
@@ -1729,6 +1989,25 @@ export default function Home() {
 
             {activeStepId === "generate" && (
               <div className="rounded-2xl border border-slate-200 bg-white/70 p-4 sm:p-5">
+                {generationMissing.length > 0 && (
+                  <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                    <p className="text-sm font-semibold text-amber-900">
+                      Complete these required items before generation
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {generationMissing.map((item) => (
+                        <button
+                          key={item.label}
+                          type="button"
+                          onClick={() => goToStep(item.step)}
+                          className="rounded-full border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-800 hover:border-amber-400"
+                        >
+                          Add {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="mb-4">
                   <h3 className="text-sm font-semibold tracking-tight text-slate-900">
                     Ready to generate
@@ -1835,7 +2114,7 @@ export default function Home() {
               >
                 Back
               </button>
-              {!isLastStep && (
+              {!isLastStep && activeStepId !== "ai-brief" && (
                 <button
                   type="button"
                   onClick={goNext}

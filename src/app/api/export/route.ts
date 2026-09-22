@@ -6,6 +6,7 @@ import {
   getAnthropicExportConfig,
 } from "@/lib/ai-models";
 import { buildRunLoopMd, getVisualDiffMjs } from "./handoff-assets";
+import { buildCmsFiles } from "./cms-assets";
 
 export const runtime = "nodejs";
 export const maxDuration = 900;
@@ -81,6 +82,9 @@ Container widths, vertical rhythm, grid choices, breakpoints inferred from the m
 ## Unique visual treatments
 Anything worth preserving: gradients, glassmorphism, custom shapes, illustration style, motion cues, etc.
 
+## Editable content plan
+For each section, identify the existing text, button labels/destinations, and photos/alt text that should be editable in Pages CMS. Separate shared business details from page-specific content. Use descriptive section/field names. Layout, styles, routes, and code remain fixed. Do not invent additional pages or content. The build agent will implement this plan using the bundled PAGES_CMS.md and cms-starter/ files.
+
 Write it so an AI coding agent can recreate the design in Astro + Tailwind without seeing the original HTML.
 
 ================
@@ -122,7 +126,7 @@ ${html}
 function buildKickoffMd(clientName: string, clientSlug: string): string {
   return `# Build the ${clientName} Astro site — Phase 1 (Scaffold)
 
-You are Claude Code running in a terminal. **This prompt only handles the project scaffold.** The homepage build happens later in a separate prompt (\`BUILD_PROMPT.md\`) once the design files are in the workspace.
+You are a coding agent (Codex or Claude Code) working in the project folder. **This prompt only handles the project scaffold.** The homepage and Pages CMS integration are built later using \`BUILD_PROMPT.md\` once the handoff files are in the workspace.
 
 This is a static Astro marketing site intended for Cloudflare Pages. Do not install \`@astrojs/cloudflare\`, \`wrangler\`, or any Cloudflare adapter unless the project explicitly needs SSR, API routes, Cloudflare bindings, KV, D1, or Workers runtime features.
 
@@ -185,24 +189,26 @@ When this site is pushed to GitHub and connected to Cloudflare Pages, use:
 
 When the scaffold is verified, tell the user to:
 
-1. Move \`BLUEPRINT.md\`, \`theme.config.ts\`, \`design/\`, and \`BUILD_PROMPT.md\` into the new \`${clientSlug}/\` folder (alongside \`src/\`, \`public/\`, etc.).
-2. Open \`${clientSlug}/\` in Cursor.
-3. Use the Claude Code extension and paste the contents of \`BUILD_PROMPT.md\` to continue with Phase 2.
+1. Move \`BLUEPRINT.md\`, \`theme.config.ts\`, \`design/\`, \`BUILD_PROMPT.md\`, \`PAGES_CMS.md\`, the entire \`cms-starter/\` folder (including its hidden \`.pages.yml\`), \`RUN_LOOP.md\`, and \`visual-diff.mjs\` into the new \`${clientSlug}/\` folder (alongside \`src/\`, \`public/\`, etc.). Preserve existing files if already moved.
+2. Open \`${clientSlug}/\` as the project in Codex or your coding editor.
+3. Use \`BUILD_PROMPT.md\` to continue with Phase 2. It requires the agent to finish the CMS fields and connect them while building; downloading the starter alone does not connect the website to Pages CMS.
 `;
 }
 
 function buildBuildPromptMd(clientName: string, clientSlug: string): string {
-  return `# Build the ${clientName} homepage — Phase 2 (Design)
+  return `# Build the ${clientName} homepage — Phase 2 (Design + content editing)
 
-You are Claude Code running inside Cursor. The scaffolded Astro project for **${clientName}** is open as the workspace, and the design hand-off files are already in this workspace.
+You are a coding agent (Codex or Claude Code). The scaffolded Astro project for **${clientName}** is open as the workspace, and the design hand-off files are already in this workspace.
 
 ## Source of truth (already in this workspace)
 
 - \`design/index.html\` — the rendered homepage mockup (frozen reference)
 - \`BLUEPRINT.md\` — design intent: vibe, sections, typography, palette, spacing, unique treatments
 - \`theme.config.ts\` — extracted theme tokens (colors, fonts, radius). You will move this to \`src/lib/theme.config.ts\` in step 1; from then on, treat \`src/lib/theme.config.ts\` as the canonical theme source.
+- \`PAGES_CMS.md\` — required content architecture, image handling, verification, and account setup guide
+- \`cms-starter/\` — starter \`.pages.yml\`, JSON content, uploads folder, and project instructions to copy/merge into the Astro project
 
-Read all three before writing any code.
+Read the references and starter files before writing any code. Pages CMS integration is part of this build, not an optional follow-up.
 
 ## What to do
 
@@ -224,17 +230,19 @@ Read all three before writing any code.
 
    In all cases, components must never reference hex values directly — every color goes through \`src/lib/theme.config.ts\` (or its CSS-mirror in v4). Pick the case that matches the mockup and proceed; do not stop to ask the user which naming style to use.
 
-4. **Recreate the homepage** as accessible Astro components, section by section, faithful to \`design/index.html\` and \`BLUEPRINT.md\`. Break the page into reusable \`.astro\` components under \`src/components/\`.
+4. **Prepare Pages CMS content before rendering components.** Follow \`PAGES_CMS.md\`: install the starter files, merge the provided \`AGENTS.md\` instructions, and populate/expand the JSON and \`.pages.yml\` to match the approved design. Use \`src/data/site.json\` for shared details and \`src/data/pages/home.json\` for homepage content. Give every additional page actually built its own JSON file and matching editor entry. Use fixed fields grouped by page/section and disable content creation, renaming, and deletion. Keep layout and routes in code. Do not introduce a CMS runtime dependency, database, custom auth, or SSR for this integration.
 
-5. **Use the mockup's copy literally.** When recreating each section, use the exact text content as it appears in \`design/index.html\` — headings, body copy, button labels, testimonials, navigation links. The mockup was generated with the client's real voice and services in mind (often pulled from their existing site). Only invent new copy if a section is genuinely incomplete in the mockup; never lorem ipsum, never paraphrase the mockup's wording.
+5. **Recreate the homepage** as accessible Astro components, section by section, faithful to \`design/index.html\` and \`BLUEPRINT.md\`. Break the page into reusable \`.astro\` components under \`src/components/\`. Import the prepared JSON at build time and bind every editable field to the rendered copy, links, metadata, or images. The editor must change the actual site, not unused duplicate content.
 
-6. **Fully responsive** (mobile, tablet, desktop). Mobile-first. The viewport meta tag is already in Astro's default layout — confirm it. **If the mockup includes a mobile hamburger menu button, implement it as a functional toggle** (a small inline \`<script>\` controlling a hidden drawer, or an Astro client directive). Do NOT ship a button that does nothing just because the mockup omitted the drawer behavior — that's a mockup limitation, not a design choice.
+6. **Use the mockup's copy literally.** Populate the content files with the exact text in \`design/index.html\` — headings, body copy, button labels, testimonials, navigation links. The mockup was generated with the client's real voice and services in mind (often pulled from their existing site). Only invent new copy if a section is genuinely incomplete in the mockup; never lorem ipsum, never paraphrase the mockup's wording. Replace starter values rather than showing them as finished copy.
 
-7. **Accessibility** — semantic HTML, descriptive alt text, keyboard navigation, sufficient color contrast. Note any contrast issues that fall below WCAG AA in the hand-off summary; do not silently downgrade them.
+7. **Fully responsive** (mobile, tablet, desktop). Mobile-first. The viewport meta tag is already in Astro's default layout — confirm it. **If the mockup includes a mobile hamburger menu button, implement it as a functional toggle** (a small inline \`<script>\` controlling a hidden drawer, or an Astro client directive). Do NOT ship a button that does nothing just because the mockup omitted the drawer behavior — that's a mockup limitation, not a design choice. Editable images use \`public/uploads\` and \`/uploads/...\` URLs; bind their selected paths and alt text and preserve the intended crop when clients replace them.
 
-8. **SEO-ready** — \`<title>\`, meta description, Open Graph tags, canonical URL.
+8. **Accessibility** — semantic HTML, descriptive alt text, keyboard navigation, sufficient color contrast. Note any contrast issues that fall below WCAG AA in the hand-off summary; do not silently downgrade them.
 
-9. **Contact/lead forms — conditional Resend + Cloudflare Pages Functions.** If \`design/index.html\` includes a contact form, lead form, booking request form, quote request form, newsletter signup, or any other form that should send an email, implement it with Cloudflare Pages Functions and Resend:
+9. **SEO-ready** — \`<title>\`, meta description, Open Graph tags, canonical URL. Bind editable metadata to the content files while keeping route/canonical configuration consistent with the actual site.
+
+10. **Contact/lead forms — conditional Resend + Cloudflare Pages Functions.** If \`design/index.html\` includes a contact form, lead form, booking request form, quote request form, newsletter signup, or any other form that should send an email, implement it with Cloudflare Pages Functions and Resend:
    - Keep the Astro site static. Do **NOT** add \`@astrojs/cloudflare\`, \`wrangler.jsonc\`, SSR mode, or Astro API routes under \`src/pages/api\`.
    - Create the server endpoint at \`functions/api/contact.ts\` so it deploys as \`/api/contact\` on Cloudflare Pages.
    - Wire the browser form to submit to \`/api/contact\` using \`fetch\` or a normal form post. Never expose secrets in client-side code.
@@ -263,11 +271,13 @@ Read all three before writing any code.
    - Do not commit real API keys. In Cloudflare Pages, add \`RESEND_API_KEY\` as an encrypted secret and add \`RESEND_FROM_EMAIL\` / \`CONTACT_TO_EMAIL\` as project variables or secrets.
    - If there is no form that needs to send email, do not create \`functions/\`, \`.dev.vars.example\`, or any Resend-related files.
 
-10. **Verify** — run \`npx astro check\` and \`npx astro build\`. Fix any errors before reporting done. If a Pages Function was added, also verify the form handler locally after building with \`npx wrangler pages dev dist\` when Wrangler is available; Wrangler is only for local Pages Function testing and should not be committed as project config.
+11. **Verify** — run \`npx astro check\` and \`npx astro build\`. Fix any errors before reporting done. Complete the content-file and replacement checks in \`PAGES_CMS.md\`: change text on each built page, a shared value, a button URL, and an image path/alt; rebuild and confirm the rendered output changes. Restore the approved content and rebuild before visual comparison or handoff. If a Pages Function was added, also verify the form handler locally after building with \`npx wrangler pages dev dist\` when Wrangler is available; Wrangler is only for local Pages Function testing and should not be committed as project config.
 
 ## Hand-off back to the user
 
 When done, summarize what was built section by section, and note any decisions you made (e.g. invented copy, breakpoints not present in the mockup, components extracted).
+
+Update \`PAGES_CMS.md\` with the actual editable field/page inventory, intentional exclusions, verification results, and the remaining GitHub, Cloudflare, and Pages CMS account steps. Do not claim the hosted editor is connected until verified. Leave repository connection, deployment, production merges, and client invitations to the owner's explicit instruction.
 
 The slugified project name is \`${clientSlug}\`.
 `;
@@ -429,6 +439,7 @@ export async function POST(req: Request) {
     const buildPromptMd = buildBuildPromptMd(trimmedClient, clientSlug);
     const runLoop = buildRunLoopMd(clientSlug);
     const visualDiff = getVisualDiffMjs();
+    const cmsFiles = buildCmsFiles(trimmedClient);
 
     console.log("[export] success", {
       slug: clientSlug,
@@ -449,6 +460,7 @@ export async function POST(req: Request) {
       buildPrompt: buildPromptMd,
       runLoop,
       visualDiff,
+      cmsFiles,
     });
   } catch (err) {
     console.error(

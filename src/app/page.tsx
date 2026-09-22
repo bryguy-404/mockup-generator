@@ -1065,15 +1065,8 @@ export default function Home() {
         throw new Error(errorFromPayload(data, "Export failed"));
       }
 
-      const { default: JSZip } = await import("jszip");
-      const zip = new JSZip();
-      zip.file("CLAUDE_KICKOFF.md", data.kickoff as string);
-      zip.file("BUILD_PROMPT.md", data.buildPrompt as string);
-      zip.file("BLUEPRINT.md", data.blueprint as string);
-      zip.file("theme.config.ts", data.themeConfig as string);
-      zip.file("RUN_LOOP.md", data.runLoop as string);
-      zip.file("visual-diff.mjs", data.visualDiff as string);
-      zip.folder("design")?.file("index.html", mockup.html);
+      const { buildDesignZip } = await import("@/lib/design-export");
+      const zip = buildDesignZip(data, mockup.html);
 
       const blob = await zip.generateAsync({ type: "blob" });
       const url = URL.createObjectURL(blob);
